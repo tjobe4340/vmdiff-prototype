@@ -1,3 +1,6 @@
 # To ensure app dependencies are ported from your virtual environment/host machine into your container, run 'pip freeze > requirements.txt' in the terminal to overwrite this file
 gunicorn
 Flask==2.2.2
+
+# Flask 2.2 imports werkzeug.urls.url_quote, removed in Werkzeug 3.
+Werkzeug>=2.2.2,<3

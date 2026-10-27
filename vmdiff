@@ -11,8 +11,7 @@ from typing import Optional, List
 import typer
 import pathlib
 import subprocess
-import sys
-import shlex
+from compose_runtime import find_compose, run_compose
 
 import os
 import re
@@ -103,15 +102,19 @@ def main(
         ./vmdiff "~/Virtual Machines.localized/VMName/" --from-snapshot 1 --to-snapshot 2 --filter-path "/home/username/"
     \b
     Ignore .log and .txt files
-        ./vmdiff "~/Virtual Machines.localized/VMName/" --from-snapshot 1 --to-snapshot 2 --filter-path "/home/username/" --ignore-path ".*\.log" --ignore-path ".*\.txt"
+        ./vmdiff "~/Virtual Machines.localized/VMName/" --from-snapshot 1 --to-snapshot 2 --filter-path "/home/username/" --ignore-path ".*\\.log" --ignore-path ".*\\.txt"
 
     """
 
     def run_command(command, description, env):
         if debug:
             print(command)
-        subprocess.run(command, stdin=sys.stdin,
-                       stdout=sys.stdout, stderr=sys.stderr, shell=True, check=True, env=env)
+        try:
+            run_compose(command, env)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            print(f"[red]Docker Compose failed: {exc}")
+            print("Check the Docker error above; ensure Docker is running and your user can access it.")
+            raise typer.Exit(code=1)
 
     file_opts = (from_disk, to_disk, from_memory, to_memory)
     disk_opts = (from_disk, to_disk)
@@ -148,15 +151,29 @@ def main(
             raise typer.BadParameter(
                 "Need both --to-disk and --from-disk.")
         else:
-            from_disk = from_disk.name
-            to_disk = to_disk.name
+            from_disk = from_disk.name if from_disk else ""
+            to_disk = to_disk.name if to_disk else ""
         if any(memory_opts) and not all(memory_opts):
             raise typer.BadParameter(
                 "Need both --to-memory and --from-memory.")
 
         else:
-            from_memory = from_memory.name
-            to_memory = to_memory.name
+            from_memory = from_memory.name if from_memory else ""
+            to_memory = to_memory.name if to_memory else ""
+
+    if use_disk and not (from_disk and to_disk):
+        raise typer.BadParameter("Provide both disk files, or use --no-use-disk.")
+    if use_memory and not (from_memory and to_memory):
+        raise typer.BadParameter("Provide both memory files, or use --no-use-memory.")
+    if not use_disk and not use_memory:
+        raise typer.BadParameter("Enable at least one of disk or memory processing.")
+
+    input_dir = input_dir.resolve()
+    try:
+        compose = find_compose()
+    except RuntimeError as exc:
+        print(f"[red]{exc}")
+        raise typer.Exit(code=1)
 
     filter_path_json = json.dumps(filter_path)
     ignore_path_json = json.dumps(ignore_path)
@@ -188,27 +205,14 @@ def main(
     env = os.environ.copy()
     env.update(env_var_mapping)
 
-    # Generate the docker compose run CLI args to mount the files.
-    volume_maps = [
-        f"{input_dir}:/snapshots"
-    ]
-
-    volume_args_list = []
-    for volume_map in volume_maps:
-        volume_args_list.append("-v")
-        volume_args_list.append(shlex.quote(volume_map))
-
-    parts = "docker compose --env-file .env run -i".split(
-        " ")
-    parts.extend(volume_args_list)
-
-    parts.extend(["memdiff"])
-    command = " ".join(parts)
+    # Interactive input is the default for both Compose variants.
+    parts = compose + ["run", "-v", f"{input_dir}:/snapshots", "memdiff"]
+    command = parts.copy()
     if use_memory and not show:
         run_command(command, "[green] :gear: Processing memory dump...", env)
 
     parts[-1] = "vmdiff"
-    command = " ".join(parts)
+    command = parts.copy()
     if not show:
         if use_disk:
             message = "[green] :gear: Reading and diffing virtual disks..."
@@ -220,7 +224,7 @@ def main(
         print("Now run with --show to display results in browser")
 
     if show:
-        command = "docker compose --env-file .env up app"
+        command = compose + ["up", "app"]
         print("[green] :gear: Serving results on http://localhost:5000")
         run_command(
             command, "[green] :gear: Serving results on localhost:5000...", env)

@@ -24,13 +24,47 @@ There's also a delightful [companion blog post](https://community.atlassian.com/
 ## Installation
 
 ```shell
-git clone github.com/vmdiff/vmdiff-prototype
+git clone https://github.com/vmdiff/vmdiff-prototype.git
 cd vmdiff-prototype
 ```
 
 ### Install Docker
 
-Docker will need to be installed and running, since `vmdiff` uses `docker-compose`.
+Install and start [Docker Desktop](https://docs.docker.com/compose/install/),
+or install Docker Engine and the [Compose plugin on Linux](https://docs.docker.com/compose/install/linux/).
+Verify the installation before running vmdiff:
+
+```shell
+docker compose version
+docker info
+```
+
+The CLI prefers `docker compose` and falls back to an existing `docker-compose`
+standalone installation. Modern Compose is recommended; the standalone fallback
+is for compatibility only. All commands run from the repository directory, so
+Compose automatically loads the included `.env` and `docker-compose.yml`, even
+when you launch the CLI from another directory.
+
+#### `unknown flag: --env-file` / exit status 125
+
+This commonly means the Docker CLI has no working Compose plugin (or is using an
+incompatible/older installation), not that the `.env` file is missing. Update or
+install Compose and verify `docker compose version`. The CLI now checks Compose
+before starting and does not require the `--env-file` flag. If discovery succeeds
+but a command fails, the Docker error is preserved: check `docker info` for daemon
+or permissions errors. Do not work around this by deleting the project's `.env`.
+
+For manual commands, run them in this repository:
+
+```shell
+docker compose config
+docker compose up --build app
+```
+
+Use `docker-compose` instead only if that is the installed variant. The viewer
+requires previously generated results and the same snapshot/options environment;
+for normal use, generate a diff with the CLI, then repeat that command with
+`--show`. Merely starting the app does not generate a diff.
 
 ### Install dependencies for the CLI
 
@@ -175,3 +209,17 @@ The raw diffs are available in a directory structure mirroring the VM in the `re
 * If a Windows disk has corrupted sectors, `dfvfs` can’t read those sectors. This comes up a lot, and while you can run `chkdsk` on the VM to get around it, it would be nice to not have to.
 * It would be nice to be able to diff snapshots of your actual computer, not a virtual machine, but this is hard without external storage
   * The two snapshots of your disk may not fit on your disk itself, to say nothing of the memory snapshots
+
+## Regression checks
+
+Install both CLI and server dependencies in a virtual environment, then run:
+
+```shell
+python -m pip install -r requirements.txt -r server_requirements.txt
+python -m unittest discover -s tests -v
+python -m compileall -q vmdiff compose_runtime.py config.py server.py backend
+```
+
+The tests cover Compose detection/fallback, command construction, errors, paths
+with spaces, and disk-only/memory-only startup. They do not replace an end-to-end
+run with Docker and actual VM snapshots.
