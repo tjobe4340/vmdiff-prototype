@@ -30,20 +30,25 @@ logging.basicConfig(
     format='[%(asctime)s]:%(levelname)s:%(message)s', level=config.LOG_LEVEL)
 
 
-class CachingStdinInputReader(command_line.StdinInputReader):
-    """Remembers the last input, so it can be reused."""
+class CachingVolumeScannerMediator(command_line.CLIVolumeScannerMediator):
+    """Remembers validated partition choices, not unrelated scanner input."""
 
-    def __init__(self, encoding='utf-8'):
-        """
-        Args:
-            encoding (Optional[str]): input encoding.
-        """
-        super(CachingStdinInputReader, self).__init__(encoding=encoding)
-        self.last_input = None
+    def __init__(self, input_reader=None, output_writer=None):
+        super().__init__(input_reader=input_reader, output_writer=output_writer)
+        # None means no partition prompt occurred (for example, a single-volume
+        # image). An empty list is a distinct, explicit selection of no partitions.
+        self.selected_partition_identifiers = None
 
-    def Read(self):
-        self.last_input = super(CachingStdinInputReader, self).Read()
-        return self.last_input
+    def GetPartitionIdentifiers(self, volume_system, volume_identifiers):
+        selected = super().GetPartitionIdentifiers(
+            volume_system, volume_identifiers)
+        self.selected_partition_identifiers = list(selected)
+        return selected
+
+    def ParsePartitionIdentifiersString(self, identifiers):
+        """Accept the same numeric/prefixed syntax as dfVFS's partition prompt."""
+        return self._ParseVolumeIdentifiersString(
+            (identifiers or '').strip(), prefix='p')
 
 
 def load_memory_results():
@@ -118,12 +123,10 @@ def Main():
     logging.basicConfig(
         level=logging.INFO, format='[%(levelname)s] %(message)s')
 
-    caching_input_reader = CachingStdinInputReader()
-    mediator = command_line.CLIVolumeScannerMediator(
-        input_reader=caching_input_reader)
+    mediator = CachingVolumeScannerMediator()
 
     volume_scanner_options = volume_scanner.VolumeScannerOptions()
-    volume_scanner_options.partitions = mediator.ParseVolumeIdentifiersString(
+    volume_scanner_options.partitions = mediator.ParsePartitionIdentifiersString(
         partition)
 
     volume_scanner_options.volumes = mediator.ParseVolumeIdentifiersString(
@@ -133,13 +136,13 @@ def Main():
     parent_lister = file_entry_lister.FileEntryLister(
         config.FROM_DISK_PATH, volume_scanner_options, mediator=mediator, ignore_dirs=config.ignore_dirs, allow_dirs=config.allow_dirs)
 
-    partition_input = partition
-    if not partition_input:
-        # Get the input the user gave the first time, if any.
-        partition_input = caching_input_reader.last_input
-
-    volume_scanner_options.partitions = list(mediator.ParseVolumeIdentifiersString(
-        partition_input))
+    # dfVFS has already stripped whitespace, expanded ranges/"all", and checked
+    # the prompted choice against the source image. Reuse that result directly:
+    # its public generic parser rejects prefixed IDs and unstripped "all\n".
+    # VSS, APFS, or credential prompts must not overwrite the partition choice.
+    if mediator.selected_partition_identifiers is not None:
+        volume_scanner_options.partitions = list(
+            mediator.selected_partition_identifiers)
 
     delta_lister = file_entry_lister.FileEntryLister(
         config.TO_DISK_PATH, volume_scanner_options, mediator=mediator, ignore_dirs=config.ignore_dirs, allow_dirs=config.allow_dirs)
