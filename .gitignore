@@ -23,3 +23,5 @@ libvmdk/
 frontend/public/json
 frontend/build/json
 !requirements.txt
+
+.venv/
