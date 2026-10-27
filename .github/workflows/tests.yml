@@ -6,7 +6,8 @@ permissions:
   contents: read
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    # Python 3.8 is not distributed for newer Ubuntu runner images.
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
         python-version: ['3.8', '3.12']
