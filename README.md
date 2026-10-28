@@ -155,7 +155,18 @@ Both disk and memory processing are enabled by default. For a disk-only run:
 ```
 
 Disk processing prompts for a partition on standard input. To select a known
-partition explicitly, add `--partition 4` (replace `4` with your partition ID).
+partition explicitly, add `--partition 4` or `--partition p4` (replace `4` with
+your partition ID). Interactive choices are reused for the second snapshot;
+numeric IDs, `p`-prefixed IDs, ranges/lists, and `all` use dfVFS's selector syntax.
+
+**Use one partition for reliable diffs.** Although the selector accepts `all`,
+this prototype does not safely distinguish identical file paths across multiple
+partitions/volumes. Fixing selection does not add full multi-partition diff
+support.
+
+The pinned dfVFS version also assumes consecutive partition IDs when expanding
+interactive `all`. If it rejects `all` on an image with gaps in the IDs, choose a
+specific displayed ID instead.
 
 After generation finishes, repeat the same input and filtering options with
 `--show`. For the disk-only example above:
@@ -260,15 +271,24 @@ Install both CLI and server dependencies in a virtual environment, then run:
 ```shell
 python -m pip install -r requirements.txt -r server_requirements.txt
 python -m pip check
+# Install only dfVFS's Python code for selector tests, not its native drivers.
+python -m pip install --no-deps dfvfs==20220816
 python -m unittest discover -s tests -v
 python -m compileall -q vmdiff compose_runtime.py config.py server.py backend
 ```
 
-The committed suite contains 15 tests. Compose discovery and process launches
+The committed suite contains 29 tests. Compose discovery and process launches
 are mocked: these checks exercise CLI validation, detection/fallback logic,
 command construction, error handling, paths containing spaces, and disk-only,
 memory-only, and combined command sequencing. The server dependency test imports
 Flask and serves a tiny test route, not the full vmdiff viewer.
+
+Partition-selector tests execute the backend's pinned dfVFS parser, validation
+loop, and scanner normalization, with native disk I/O and unrelated diff/cache
+processing mocked. They cover reuse across snapshots, `all`, prefixed/numeric
+IDs, whitespace/CRLF, ranges, invalid-input retries, no-prompt paths, and later
+volume/credential prompts. The test-only `--no-deps` install intentionally omits
+dfVFS's runtime dependencies; it is not a runnable disk-processing installation.
 
 The GitHub Actions matrix runs on Python **3.8 and 3.12**. It does not currently
 include Python 3.15.
