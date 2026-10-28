@@ -44,7 +44,12 @@ class FileEntryLister(volume_scanner.VolumeScanner):
             raise Exception(
                 f'{source}: No supported file system found in source.')
 
-        # TODO: Support multiple base path specs
+        if len(self.base_path_specs) != 1:
+            raise ValueError(
+                'Multiple supported volumes were selected. Choose exactly one '
+                'partition/volume; combining volumes can overwrite identical paths.')
+
+        # Paths are unambiguous only within this single filesystem.
         self.base_path_spec = self.base_path_specs[0]
         self.file_system = resolver.Resolver.OpenFileSystem(
             self.base_path_spec)
@@ -90,8 +95,6 @@ class FileEntryLister(volume_scanner.VolumeScanner):
         for allow_dir in self.allow_dirs:
             if location.startswith(allow_dir) or allow_dir.startswith(location):
                 for ignore_dir in self.ignore_dirs:
-                    # Convert to raw string so backslashes aren't interpreted as escapes.
-                    ignore_dir = repr(ignore_dir).strip("'")
                     if re.search(ignore_dir, location):
                         return False
                 return True
@@ -151,7 +154,7 @@ class FileEntryLister(volume_scanner.VolumeScanner):
 
         for base_path_spec in self.base_path_specs:
             path_spec = factory.Factory.NewPathSpec(
-                base_path_spec.type_indicator, location=path, parent=self.base_path_spec.parent)
+                base_path_spec.type_indicator, location=path, parent=base_path_spec.parent)
             try:
                 file_entry = resolver.Resolver.OpenFileEntry(path_spec)
                 if file_entry:

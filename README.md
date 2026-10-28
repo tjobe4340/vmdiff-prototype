@@ -159,10 +159,11 @@ partition explicitly, add `--partition 4` or `--partition p4` (replace `4` with
 your partition ID). Interactive choices are reused for the second snapshot;
 numeric IDs, `p`-prefixed IDs, ranges/lists, and `all` use dfVFS's selector syntax.
 
-**Use one partition for reliable diffs.** Although the selector accepts `all`,
-this prototype does not safely distinguish identical file paths across multiple
-partitions/volumes. Fixing selection does not add full multi-partition diff
-support.
+**Choose one supported filesystem.** The selector accepts `all`, but processing
+now stops with an explicit error if it resolves to more than one supported
+filesystem. This avoids silently overwriting identical guest paths from different
+partitions or nested volumes. Select a single partition (for example, `--partition 3`);
+full multi-volume comparison is not implemented.
 
 The pinned dfVFS version also assumes consecutive partition IDs when expanding
 interactive `all`. If it rejects `all` on an image with gaps in the IDs, choose a
@@ -234,7 +235,11 @@ examples and behavior notes above.
 ### Browse the diffs via shell
 
 Generated diffs are stored under this repository's `results/` directory in
-run-specific subdirectories, with guest paths mirrored within the disk output.
+versioned run-specific subdirectories. Disk entries are JSON files named by a
+SHA-256 hash of the normalized guest path under `disk/entries/`; each stores its
+original guest path, directory flag, and diff lines. Guest filenames are not
+used as host paths. Process diffs are stored separately by numeric process ID.
+Search the JSON contents rather than assuming the old mirrored directory layout.
 
 ## How it works
 
@@ -277,21 +282,76 @@ python -m unittest discover -s tests -v
 python -m compileall -q vmdiff compose_runtime.py config.py server.py backend
 ```
 
-The committed suite contains 29 tests. Compose discovery and process launches
-are mocked: these checks exercise CLI validation, detection/fallback logic,
-command construction, error handling, paths containing spaces, and disk-only,
-memory-only, and combined command sequencing. The server dependency test imports
-Flask and serves a tiny test route, not the full vmdiff viewer.
+The committed Python suite contains 72 tests. Compose launches, native disk I/O,
+and Volatility output are replaced with controlled fixtures where required.
+The tests exercise real pinned dfVFS parser/scanner code, CLI validation and
+command construction, cache containment/collisions/completion, disk comparison
+logic, memory-only orchestration, optional process fields, the real POSIX memory
+entrypoint, and Flask routes. The test-only `--no-deps` dfVFS install is not a
+runnable native disk-processing installation.
 
-Partition-selector tests execute the backend's pinned dfVFS parser, validation
-loop, and scanner normalization, with native disk I/O and unrelated diff/cache
-processing mocked. They cover reuse across snapshots, `all`, prefixed/numeric
-IDs, whitespace/CRLF, ranges, invalid-input retries, no-prompt paths, and later
-volume/credential prompts. The test-only `--no-deps` install intentionally omits
-dfVFS's runtime dependencies; it is not a runnable disk-processing installation.
+Frontend checks (Node 24):
 
-The GitHub Actions matrix runs on Python **3.8 and 3.12**. It does not currently
-include Python 3.15.
+```shell
+cd frontend
+npm ci
+CI=true npm test -- --watchAll=false --runInBand
+CI=true npm run build
+```
+
+Seven React tests cover empty/unchanged diffs, failed requests and retry,
+selection races, and folder-loading completion. They use mocked network/tree
+components; a production build is also checked. They are not browser or real
+snapshot integration tests. GitHub Actions runs Python **3.8 and 3.12**, plus
+these frontend checks. Python 3.15.2 is tested locally, not in the CI matrix.
+
+### Runtime audit update — 2026-10-28
+
+The audit fixes unsafe cache paths, file/directory cache collisions, cache-key
+collisions across options/inputs, false-success memory extraction, binary/text
+comparison errors, missing Windows timestamps and process fields, snapshot
+metadata parsing, memory-only disk initialization, and viewer loading failures.
+Memory diffs now pass an empty line list for absent processes, which is required
+by Python 3.15's stricter `difflib` input validation.
+Failed or interrupted generation has no completion marker and is not reusable.
+The viewer binds only to `127.0.0.1:5000` and no longer grants wildcard API CORS.
+Treat snapshots and analysis results as sensitive; this is a local viewer, not
+an authenticated public service.
+
+**Rebuild after pulling these changes.** Some files (including `config.py` and
+the viewer) are copied into images rather than bind-mounted. Existing published
+images do not contain these fixes. From the repository:
+
+```shell
+mkdir -p results memory-processing/volatilitycache
+docker compose build vmdiff memdiff app
+```
+
+Then generate the comparison again using the CLI before repeating it with
+`--show`. The new `v2-` cache namespace leaves old results untouched; old results
+are not migrated. `--no-cache` regenerates extraction and derived results.
+Interactive partition runs always regenerate because their selected ID is not
+known to the separate viewer invocation. Repeat the same input/options for
+`--show`, preferably with an explicit partition ID.
+
+The CLI input identity includes resolved input directory, selected filenames,
+sizes and modification times, **not full image hashes or every parent/extent**.
+If inputs/parents change without those attributes changing, use `--no-cache`.
+Direct Compose use without the CLI does not get the host input fingerprint.
+
+The memory container retains its existing unprivileged user. On Linux, bind
+mounts must be writable by that container user and readable by the processor/
+viewer users. Creating directories on the host avoids Docker creating root-owned
+mountpoints, but does not alone guarantee matching UID permissions. If permission
+errors occur, check ownership/UID mapping for these output directories; do not
+make them world-writable. Docker builds and these permissions are not integration-
+tested here.
+
+Remaining limitations: content-change detection first compares size/metadata and
+can miss same-size edits with unchanged metadata; content diffs over 2 MiB use a
+placeholder; only one supported filesystem is processed; native VMDK chain/handle
+lifecycle and real VM processing still need integration validation. The audit is
+not a guarantee of forensic completeness or a full dependency-security audit.
 
 ### Manual Python 3.15.2 check — 2026-10-27
 

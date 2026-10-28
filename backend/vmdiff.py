@@ -16,6 +16,7 @@ import json
 import inspect
 
 import hashlib
+import shutil
 
 
 # Hacks to import the config from the parent directory.
@@ -52,7 +53,7 @@ class CachingVolumeScannerMediator(command_line.CLIVolumeScannerMediator):
 
 
 def load_memory_results():
-    memory_run_name = f"{config.FROM_MEMORY_IMAGE_FILENAME}__{config.TO_MEMORY_IMAGE_FILENAME}"
+    memory_run_name = config.MEMORY_RUN_ID
     memory_run_path = os.path.join(
         config.RESULTS_DIR, "memory", memory_run_name)
     results = {}
@@ -65,6 +66,8 @@ def load_memory_results():
         with open(to_plugin_path) as f:
             to_plugin = json.load(f)
 
+        if not isinstance(from_plugin, list) or not isinstance(to_plugin, list):
+            raise ValueError(f'Memory plugin {plugin} did not produce JSON arrays')
         results[plugin] = (from_plugin, to_plugin)
 
     return results
@@ -78,8 +81,8 @@ def dump_api_data(cache):
     children_dir = dump_dir / "children"
     diff_dir = dump_dir / "diff"
 
-    if config.USE_CACHE and dump_dir.exists():
-        return
+    if dump_dir.exists():
+        shutil.rmtree(dump_dir)
 
     logging.info(f"Generating API data for static site: {dump_dir}")
 
@@ -91,7 +94,7 @@ def dump_api_data(cache):
 
     tree, children_map = cache.get_tree_data_from_cache()
 
-    json.dump(tree, open(dump_dir / "changed_files", "w"))
+    cache._atomic_json(dump_dir / "changed_files", tree)
 
     # Dump all the data with url encoded keys, so we can serve it statically later
     for key, children in children_map.items():
@@ -100,7 +103,7 @@ def dump_api_data(cache):
         filename = hashlib.sha1(key.encode("utf8")).hexdigest()
 
         path = children_dir / filename
-        json.dump(children, open(path, "w"))
+        cache._atomic_json(path, children)
 
         # Get the diff and dump it too.
         diff = cache.get_diff(key)
@@ -109,70 +112,80 @@ def dump_api_data(cache):
         else:
             result = diff.diff_lines
 
-        if result:
-            path = diff_dir / filename
-            json.dump(result, open(path, "w"))
+        path = diff_dir / filename
+        cache._atomic_json(path, result or [])
 
 
 def Main():
 
-    # Leave Blank or invalid for interactive prompt
-    partition = config.PARTITION
-    VOLUMES = "all"
+    if not config.USE_DISK and not config.USE_MEMORY:
+        raise RuntimeError('Enable disk or memory comparison')
 
-    logging.basicConfig(
-        level=logging.INFO, format='[%(levelname)s] %(message)s')
+    used_partition_prompt = False
+    if config.USE_DISK:
+        # Leave Blank or invalid for interactive prompt
+        partition = config.PARTITION
+        VOLUMES = "all"
 
-    mediator = CachingVolumeScannerMediator()
+        logging.basicConfig(
+            level=logging.INFO, format='[%(levelname)s] %(message)s')
 
-    volume_scanner_options = volume_scanner.VolumeScannerOptions()
-    volume_scanner_options.partitions = mediator.ParsePartitionIdentifiersString(
-        partition)
+        mediator = CachingVolumeScannerMediator()
 
-    volume_scanner_options.volumes = mediator.ParseVolumeIdentifiersString(
-        VOLUMES)
+        volume_scanner_options = volume_scanner.VolumeScannerOptions()
+        volume_scanner_options.partitions = mediator.ParsePartitionIdentifiersString(
+            partition)
 
-    # Init disk file listers.
-    parent_lister = file_entry_lister.FileEntryLister(
-        config.FROM_DISK_PATH, volume_scanner_options, mediator=mediator, ignore_dirs=config.ignore_dirs, allow_dirs=config.allow_dirs)
+        volume_scanner_options.volumes = mediator.ParseVolumeIdentifiersString(
+            VOLUMES)
 
-    # dfVFS has already stripped whitespace, expanded ranges/"all", and checked
-    # the prompted choice against the source image. Reuse that result directly:
-    # its public generic parser rejects prefixed IDs and unstripped "all\n".
-    # VSS, APFS, or credential prompts must not overwrite the partition choice.
-    if mediator.selected_partition_identifiers is not None:
-        volume_scanner_options.partitions = list(
-            mediator.selected_partition_identifiers)
+        # Init disk file listers.
+        parent_lister = file_entry_lister.FileEntryLister(
+            config.FROM_DISK_PATH, volume_scanner_options, mediator=mediator, ignore_dirs=config.ignore_dirs, allow_dirs=config.allow_dirs)
 
-    delta_lister = file_entry_lister.FileEntryLister(
-        config.TO_DISK_PATH, volume_scanner_options, mediator=mediator, ignore_dirs=config.ignore_dirs, allow_dirs=config.allow_dirs)
+        # dfVFS has already stripped whitespace, expanded ranges/"all", and checked
+        # the prompted choice against the source image. Reuse that result directly:
+        # its public generic parser rejects prefixed IDs and unstripped "all\n".
+        # VSS, APFS, or credential prompts must not overwrite the partition choice.
+        if mediator.selected_partition_identifiers is not None:
+            volume_scanner_options.partitions = list(
+                mediator.selected_partition_identifiers)
 
-    # ls parition to make sure it's the right one:
-    if not partition:
-        entries = list(
-            parent_lister.file_system.GetRootFileEntry().sub_file_entries)
-        ls_root = [e.name for e in entries]
-        logging.info(f"Partition {partition} root files: {ls_root}")
+        delta_lister = file_entry_lister.FileEntryLister(
+            config.TO_DISK_PATH, volume_scanner_options, mediator=mediator, ignore_dirs=config.ignore_dirs, allow_dirs=config.allow_dirs)
 
-    diff_config = config.diff_config
-    differ = diskdiff.DiskDiffer(
-        parent_lister, delta_lister,
-        **diff_config
-    )
+        # ls parition to make sure it's the right one:
+        if not partition:
+            entries = list(
+                parent_lister.file_system.GetRootFileEntry().sub_file_entries)
+            ls_root = [e.name for e in entries]
+            logging.info(f"Partition {partition} root files: {ls_root}")
 
-    USE_CACHE = config.USE_CACHE
+        used_partition_prompt = mediator.selected_partition_identifiers is not None
+        diff_config = config.diff_config
+        differ = diskdiff.DiskDiffer(
+            parent_lister, delta_lister,
+            **diff_config
+        )
+
+    # Interactive selection has no stable key visible to --show. Always
+    # regenerate that run so a new choice cannot reuse another partition's data.
+    USE_CACHE = config.USE_CACHE and not (config.USE_DISK and (not config.PARTITION or used_partition_prompt))
 
     run_process_path = config.RUN_MEMORY_PATH if config.USE_MEMORY else None
 
     cache = diffcache.DiffCache(
         config.RUN_DISK_PATH, config.RUN_TREE_PATH, run_process_path)
 
-    if USE_CACHE and cache.cache_exists() and (not config.USE_MEMORY or (config.USE_MEMORY and cache.process_cache_exists())):
+    if (USE_CACHE and cache.tree_cache_exists()
+            and (not config.USE_DISK or cache.cache_exists())
+            and (not config.USE_MEMORY or cache.process_cache_exists())):
         # Slice off the leading "/" and trailing "/disk"
         results_dir = os.path.join(*cache.run_path.parts[1:-1])
         logging.info(f"Results already cached at: {str(results_dir)}")
         # The diffs can be accessed via cache.get_diff_from_cache(path)
     else:
+        cache.invalidate()
         logging.info("No cache found, diffing... ")
 
         if config.USE_DISK:
@@ -193,12 +206,13 @@ def Main():
             logging.info("Diffing memory... ")
 
             plugin_results = load_memory_results()
-            from_pslist, to_pslist = plugin_results.get(
-                "windows.pslist.PsList")
+            if 'windows.pslist.PsList' not in plugin_results:
+                raise RuntimeError('Memory comparison requires windows.pslist.PsList')
+            from_pslist, to_pslist = plugin_results['windows.pslist.PsList']
             from_envars, to_envars = plugin_results.get(
-                "windows.envars.Envars")
+                "windows.envars.Envars", ([], []))
             from_cmdline, to_cmdline = plugin_results.get(
-                "windows.cmdline.CmdLine")
+                "windows.cmdline.CmdLine", ([], []))
 
             # Load pslists already provided by memory-processing.
             mem_differ = memdiff.MemoryDiffer(from_pslist,
@@ -230,6 +244,7 @@ def Main():
 
         cache.cache_tree(merged_tree)
         dump_api_data(cache)
+        cache.mark_complete()
 
         logging.info(f"Saved results to {cache.run_path}")
 

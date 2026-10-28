@@ -71,7 +71,7 @@ class DiffTree(object):
         lines_added = 0
         lines_removed = 0
 
-        diff = self.differ.diff(path)
+        diff = self.differ.diffs.get(path)
 
         if diff is not None:
             status = diff.status

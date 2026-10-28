@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 import { FolderOutlined, ExperimentOutlined } from '@ant-design/icons';
 
@@ -33,7 +33,7 @@ type DiffNodeProps = {
 
 type DiffNode = DataNode & Partial<DiffNodeProps>;
 
-let DEMO = !(process.env.VMDIFF_DEMO === "false")
+const DEMO = process.env.REACT_APP_VMDIFF_DEMO !== "false"
 let BASE_URL = ""
 
 // Serve from the cached /json directory if this is a demo, otherwise from the localhost server directly.
@@ -52,51 +52,39 @@ const colours: any = {
 
 const initTreeData: DiffNode[] = [];
 
+const readJson = async <T,>(url: string, emptyOnMissing = false): Promise<T> => {
+  const response = await fetch(url);
+  // Older static exports omit unchanged parent diffs. Treat these as empty,
+  // but keep actual HTTP failures visible rather than parsing an HTML error.
+  if (emptyOnMissing && response.status === 404) return [] as unknown as T;
+  if (!response.ok) throw new Error(`Request failed (${response.status})`);
+  return response.json();
+};
+
 const getInitTreeData = (): Promise<DiffNode[]> => {
 
-  return fetch(BASE_URL + "/changed_files").then((response) => {
-    return response.json()
-  });
+  return readJson<DiffNode[]>(BASE_URL + "/changed_files");
 }
 
-const getChildrenData = (key: React.Key): Promise<DiffNode[]> => {
-
-  if (DEMO) {
-    const hasher = sha1(String(key))
-
-    return hasher.then((hash) => {
-      return fetch(BASE_URL + `/children/` + hash).then((response) => {
-        return response.json()
-      });
-    });
-
-  } else {
-    return fetch(BASE_URL + `/children?` + new URLSearchParams({
-      key: String(key)
-    })).then((response) => {
-      return response.json()
-    });
-  }
+const getChildrenData = async (key: React.Key): Promise<DiffNode[]> => {
+  const url = DEMO
+    ? BASE_URL + "/children/" + await sha1(String(key))
+    : BASE_URL + "/children?" + new URLSearchParams({ key: String(key) });
+  const children = await readJson<DiffNode[]>(url);
+  if (!Array.isArray(children)) throw new Error("Invalid children response");
+  return children;
 }
-const getDiffString = (key: React.Key): Promise<string[]> => {
 
-  if (DEMO) {
-    const hasher = sha1(String(key))
-
-    return hasher.then((hash) => {
-      return fetch(BASE_URL + `/diff/` + hash).then((response) => {
-        return response.json()
-      });
-    });
-
-  } else {
-
-    return fetch(BASE_URL + `/diff?` + new URLSearchParams({
-      key: String(key)
-    })).then((response) => {
-      return response.json()
-    });
+const getDiffString = async (key: React.Key): Promise<string[]> => {
+  const url = DEMO
+    ? BASE_URL + "/diff/" + await sha1(String(key))
+    : BASE_URL + "/diff?" + new URLSearchParams({ key: String(key) });
+  const lines = await readJson<string[] | null>(url, DEMO);
+  if (lines === null) return [];
+  if (!Array.isArray(lines) || lines.some(line => typeof line !== "string")) {
+    throw new Error("Invalid diff response");
   }
+  return lines;
 }
 
 const treeMap = new Map<React.Key, DiffNode>();
@@ -154,6 +142,7 @@ const getDiffHtml = (key: React.Key): Promise<string> => {
 
   return getDiffString(key).then((diffLines) => {
 
+    if (diffLines.length === 0) return "";
     const unifiedDiffString = diffLines.join("");
     const diffHtml = Diff2Html.html(
       unifiedDiffString,
@@ -176,9 +165,15 @@ const App: React.FC = () => {
   const [autoExpandParent, setAutoExpandParent] = useState(true);
   const [diff, setDiff] = useState("");
   const [collapsed, setCollapsed] = useState(true);
+  const [error, setError] = useState("");
+  const [loadingDiff, setLoadingDiff] = useState(false);
+  const selectedRequest = useRef(0);
 
   useEffect(() => {
+    let active = true;
     getInitTreeData().then((data) => {
+      if (!active) return;
+      treeMap.clear();
       cache(data)
       iconifyAll()
       const newExpandedKeys: React.Key[] = []
@@ -207,7 +202,10 @@ const App: React.FC = () => {
       setExpandedKeys(newExpandedKeys)
       setLoadedKeys(newLoadedKeys)
       setTreeData(data)
-    })
+    }).catch(() => {
+      if (active) setError("Could not load comparison results.");
+    });
+    return () => { active = false; selectedRequest.current += 1; };
   }, []);
 
 
@@ -242,49 +240,43 @@ const App: React.FC = () => {
   }
 
   const expand = (key: React.Key) => {
-    if (!(key in expandedKeys)) {
+    if (!expandedKeys.includes(key)) {
       setExpandedKeys((prev) => [...prev, key]);
     }
   }
 
-  const onSelect = (selectedKeys: React.Key[]): any => {
-    const key = selectedKeys[0];
-
-    getDiffHtml(key).then((html) => {
-      setDiff(html);
+  const onSelect = (selectedKeys: React.Key[]): void => {
+    const request = ++selectedRequest.current;
+    setDiff("");
+    setError("");
+    setLoadingDiff(false);
+    if (selectedKeys.length === 0) return;
+    setLoadingDiff(true);
+    getDiffHtml(selectedKeys[0]).then((html) => {
+      if (request === selectedRequest.current) setDiff(html);
+    }).catch(() => {
+      if (request === selectedRequest.current) setError("Could not load this diff. Select it again to retry.");
+    }).finally(() => {
+      if (request === selectedRequest.current) setLoadingDiff(false);
     });
-
   }
 
-
-
-  const onLoadData = ({ key, children }: any) =>
-    new Promise<void>(resolve => {
-      console.log(key)
-      if (children != null && children.length > 0) {
-        // Do nothing if the node has children already somehow (double expand?)
-        resolve();
-        return;
-      }
-
-      setTimeout(() => {
-        // Load the children of this node.
-        getChildrenData(key).then((children) => {
-          cache(children)
-          setTreeData(origin =>
-            origin === undefined ? undefined :
-              updateTreeData(origin, key, children)
-          );
-          children.forEach((child) => {
-            if (!child.isLeaf && shouldAutoExpand(child.key)) {
-              expand(child.key);
-            }
-          })
-          resolve();
-        })
-        resolve();
-      })
-    });
+  const onLoadData = async ({ key, children }: DiffNode): Promise<void> => {
+    if (children != null && children.length > 0) return;
+    try {
+      const loaded = await getChildrenData(key);
+      setError("");
+      cache(loaded);
+      setTreeData(origin => origin === undefined ? undefined : updateTreeData(origin, key, loaded));
+      loaded.forEach(child => {
+        if (!child.isLeaf && shouldAutoExpand(child.key)) expand(child.key);
+      });
+    } catch (error) {
+      setError("Could not load this folder. Expand it again to retry.");
+      // AntD must see rejection so it does not mark an unsuccessful load done.
+      throw error;
+    }
+  }
 
   const renderTitle = (node: DiffNode): React.ReactNode | undefined => {
     const titleTextStyle = {
@@ -382,6 +374,9 @@ const App: React.FC = () => {
       <Content style={{ margin: '24px 16px 0', overflow: 'initial' }}>
 
         <div className="site-layout-background" style={{ padding: 24, textAlign: 'center' }}>
+          {error && <p role="alert">{error}</p>}
+          {loadingDiff && <p role="status">Loading diff…</p>}
+          {!error && !loadingDiff && !diff && <p>No content diff for this item.</p>}
           <div id="code-diff" dangerouslySetInnerHTML={{ __html: diff }}>
           </div>
         </div>

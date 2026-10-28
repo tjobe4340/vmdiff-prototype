@@ -8,6 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 
+USER root
 WORKDIR /memdiff
 RUN mkdir -p volatilitycache
 RUN mkdir -p results
@@ -15,7 +16,6 @@ COPY memory-processing/memdiff.sh .
 
 # Creates a non-root user with an explicit UID and adds permission to access the /app folder
 # For more info, please refer to https://aka.ms/vscode-docker-python-configure-containers
-USER root
 RUN chown -R unprivileged /memdiff
 RUN chmod +x memdiff.sh
 

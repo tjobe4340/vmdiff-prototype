@@ -44,17 +44,17 @@ class MemoryDiffer(object):
         to_proc = self.to_procs.get(pid, "")
 
         # Ignore "Required memory <address> is not valid (process exited?)" errors.
-        if to_proc and "is not valid (process exited?)" in to_proc["CommandLine"]:
+        if to_proc and "is not valid (process exited?)" in (to_proc.get("CommandLine") or ""):
             to_proc = ""
-        if from_proc and "is not valid (process exited?)" in from_proc["CommandLine"]:
+        if from_proc and "is not valid (process exited?)" in (from_proc.get("CommandLine") or ""):
             from_proc = ""
 
         kwargs = {}
         fromfile = self._make_title(from_proc)
         tofile = self._make_title(to_proc)
 
-        from_name = fromfile.split("-")[0] if fromfile else ""
-        to_name = tofile.split("-")[0] if tofile else ""
+        from_name = from_proc.get("ImageFileName", "") if from_proc else ""
+        to_name = to_proc.get("ImageFileName", "") if to_proc else ""
 
         if self.ignore_regex:
             # Ignore this proceses if the to or from process name matches the supplied regex.
@@ -109,14 +109,11 @@ class MemoryDiffer(object):
 
     def add_envars(self, from_envars, to_envars):
 
-        if not from_envars and to_envars:
-            return
-
         def _add_envars_to_procs(envars, procs):
 
             # Group vars by PID
             pid_vars = collections.defaultdict(dict)
-            for var in envars:
+            for var in envars or []:
                 key = var["Variable"]
                 value = var["Value"]
                 pid = str(var["PID"])
@@ -124,25 +121,24 @@ class MemoryDiffer(object):
 
             # Add vars dict to PID in procs
             for pid in pid_vars:
-                procs[pid]["EnvironmentVariables"] = pid_vars[pid]
+                if pid in procs:
+                    procs[pid]["EnvironmentVariables"] = pid_vars[pid]
 
         _add_envars_to_procs(from_envars, self.from_procs)
         _add_envars_to_procs(to_envars, self.to_procs)
 
     def add_cmdline(self, from_cmdline, to_cmdline):
 
-        if not from_cmdline and to_cmdline:
-            return
-
         def _add_cmdline_to_procs(cmdlines, procs):
 
             # Group vars by PID
-            for cmdline in cmdlines:
-                args = cmdline["Args"]
+            for cmdline in cmdlines or []:
+                args = cmdline.get("Args")
                 pid = str(cmdline["PID"])
 
                 # Add "Args" field to existing processes by PID
-                procs[pid]["CommandLine"] = args
+                if pid in procs:
+                    procs[pid]["CommandLine"] = args
 
         _add_cmdline_to_procs(from_cmdline, self.from_procs)
         _add_cmdline_to_procs(to_cmdline, self.to_procs)
@@ -162,18 +158,19 @@ class MemoryDiffer(object):
 
     def _list_by_id(self, pslist):
         procs = {}
-        for proc in pslist:
+        for original in pslist:
+            proc = dict(original)
             process_id = self._make_id(proc)
             # Ignore "Threads" value, since it changes a lot and isn't worth diffing on.
 
-            del proc["Threads"]
+            proc.pop("Threads", None)
 
             procs[process_id] = proc
         return procs
 
     def _to_string(self, proc):
         if not proc:
-            return ""
+            return []
         return [line + "\n" for line in json.dumps(proc,
                                                    separators=(',', ': '),
                                                    sort_keys=True,
