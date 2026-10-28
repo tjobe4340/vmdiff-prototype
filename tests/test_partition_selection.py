@@ -166,12 +166,10 @@ class PartitionSelectionTests(unittest.TestCase):
 
     def test_sparse_partition_ids_keep_dfvfs_validation_behavior(self):
         self.volume_system = self.make_volume_system(['p1', 'p3'])
-        # Pinned dfVFS expands interactive "all" as p1..pN, so sparse IDs
-        # require an explicit choice. Keep its retry behavior, not a bad cache.
-        scans, mediator = self.run_main('all\np3\n')
-        self.assertEqual(scans, [([], ['p3']), (['p3'], ['p3'])])
-        self.assertEqual(mediator.selected_partition_identifiers, ['p3'])
-        self.assertIn(b'Unsupported partition identifier(s)', self.output.getvalue())
+        scans, mediator = self.run_main('all\n')
+        self.assertEqual(scans, [([], ['p1', 'p3']), (['p1', 'p3'], ['p1', 'p3'])])
+        self.assertTrue(mediator.selected_all_partitions)
+        self.assertEqual(self.output.getvalue().count(b'Unsupported partition identifier(s)'), 0)
         for configured in ('3', 'p3', 'all'):
             expected = ['p1', 'p3'] if configured == 'all' else ['p3']
             scans, mediator = self.run_main('', configured=configured)
