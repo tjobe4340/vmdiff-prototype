@@ -156,8 +156,8 @@ class ConfigIdentityTests(unittest.TestCase):
 
     def test_run_id_is_not_a_snapshot_path(self):
         config = self.config({'FROM_DISK_IMAGE_FILENAME': '/../../outside'})
-        self.assertRegex(config.RUN_ID, r'^v2-[a-f0-9]{24}$')
-        self.assertTrue(config.RUN_PATH.startswith('/results/v2-'))
+        self.assertRegex(config.RUN_ID, r'^v3-[a-f0-9]{24}$')
+        self.assertTrue(config.RUN_PATH.startswith('/results/v3-'))
 
     def test_false_dev_flag_does_not_switch_paths(self):
         self.assertEqual(self.config({'VMDIFF_DEV': 'False'}).RESULTS_DIR, '/results')

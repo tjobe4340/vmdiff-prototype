@@ -75,8 +75,8 @@ REACT_BUILD_DIR = os.environ[f"REACT_BUILD_DIR{dev}"]
 LOG_LEVEL = logging.DEBUG if dev or as_bool(os.environ.get("VMDIFF_DEBUG")) else logging.INFO
 
 
-# v2 changes cache identity and the on-disk disk entry format. Old caches are
-# deliberately left untouched; they must not be interpreted as v2 results.
+# v3 adds GUID-scoped disk keys. Older derived caches are left untouched.
+# Raw memory extraction remains v2 because its contents are unchanged.
 SOURCE_ID = os.environ.get('VMDIFF_SOURCE_ID') or os.path.abspath(SNAPSHOT_DIR)
 MEMORY_RUN_ID = os.environ.get('VMDIFF_MEMORY_RUN_ID') or (
     'memory-v2-' + hashlib.sha256(json.dumps({
@@ -86,7 +86,7 @@ MEMORY_RUN_ID = os.environ.get('VMDIFF_MEMORY_RUN_ID') or (
 
 def get_run_id():
     options = {
-        'schema': 2, 'source': SOURCE_ID,
+        'schema': 3, 'source': SOURCE_ID,
         'disk': [USE_DISK, FROM_DISK_IMAGE_FILENAME, TO_DISK_IMAGE_FILENAME],
         'memory': [USE_MEMORY, FROM_MEMORY_IMAGE_FILENAME, TO_MEMORY_IMAGE_FILENAME],
         'partition': PARTITION, 'diff': diff_config,
@@ -96,7 +96,7 @@ def get_run_id():
     }
     digest = hashlib.sha256(json.dumps(
         options, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:24]
-    return 'v2-' + digest
+    return 'v3-' + digest
 
 
 RUN_ID = get_run_id()

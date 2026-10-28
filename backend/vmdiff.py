@@ -39,6 +39,18 @@ class CachingVolumeScannerMediator(command_line.CLIVolumeScannerMediator):
         # None means no partition prompt occurred (for example, a single-volume
         # image). An empty list is a distinct, explicit selection of no partitions.
         self.selected_partition_identifiers = None
+        self.selected_all_partitions = False
+
+    def _ReadSelectedVolumes(self, volume_system, prefix='v'):
+        if prefix != 'p':
+            return super()._ReadSelectedVolumes(volume_system, prefix=prefix)
+        text = self._input_reader.Read().strip()
+        selected = self._ParseVolumeIdentifiersString(text, prefix='p') if text else []
+        self.selected_all_partitions = selected == ['all']
+        if self.selected_all_partitions:
+            # dfVFS's p1..pN expansion is wrong for sparse GPT entry identifiers.
+            return list(volume_system.volume_identifiers)
+        return selected
 
     def GetPartitionIdentifiers(self, volume_system, volume_identifiers):
         selected = super().GetPartitionIdentifiers(
@@ -139,7 +151,7 @@ def Main():
         volume_scanner_options.volumes = mediator.ParseVolumeIdentifiersString(
             VOLUMES)
 
-        # Init disk file listers.
+        # Init disk file listers; direct GPT selections follow partition GUIDs.
         parent_lister = file_entry_lister.FileEntryLister(
             config.FROM_DISK_PATH, volume_scanner_options, mediator=mediator, ignore_dirs=config.ignore_dirs, allow_dirs=config.allow_dirs)
 
@@ -147,15 +159,19 @@ def Main():
         # the prompted choice against the source image. Reuse that result directly:
         # its public generic parser rejects prefixed IDs and unstripped "all\n".
         # VSS, APFS, or credential prompts must not overwrite the partition choice.
+        # This remains the legacy fallback; GPT listers map identities instead.
         if mediator.selected_partition_identifiers is not None:
             volume_scanner_options.partitions = list(
                 mediator.selected_partition_identifiers)
 
         delta_lister = file_entry_lister.FileEntryLister(
-            config.TO_DISK_PATH, volume_scanner_options, mediator=mediator, ignore_dirs=config.ignore_dirs, allow_dirs=config.allow_dirs)
+            config.TO_DISK_PATH, volume_scanner_options, mediator=mediator, ignore_dirs=config.ignore_dirs, allow_dirs=config.allow_dirs,
+            selection_reference=parent_lister)
 
-        # ls parition to make sure it's the right one:
-        if not partition:
+        file_entry_lister.AlignVolumes(parent_lister, delta_lister)
+
+        # Preview the first selected filesystem root.
+        if not partition and parent_lister.file_system is not None:
             entries = list(
                 parent_lister.file_system.GetRootFileEntry().sub_file_entries)
             ls_root = [e.name for e in entries]

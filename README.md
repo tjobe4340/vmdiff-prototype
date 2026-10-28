@@ -154,20 +154,36 @@ Both disk and memory processing are enabled by default. For a disk-only run:
 ./vmdiff "$VM_DIR" --from-snapshot 1 --to-snapshot 2 --no-use-memory
 ```
 
-Disk processing prompts for a partition on standard input. To select a known
-partition explicitly, add `--partition 4` or `--partition p4` (replace `4` with
-your partition ID). Interactive choices are reused for the second snapshot;
-numeric IDs, `p`-prefixed IDs, ranges/lists, and `all` use dfVFS's selector syntax.
+Disk processing prompts for a partition on standard input. To select one, add
+`--partition 4` or `--partition p4` (replace `4` with the first snapshot's ID).
+Numeric IDs, `p`-prefixed IDs, and ranges/lists are accepted. `--partition all`
+(or interactive `all`) compares all supported direct GPT filesystems in both
+snapshots, including newly added or removed partitions. Sparse partition IDs
+are handled without assuming consecutive numbering.
 
-**Choose one supported filesystem.** The selector accepts `all`, but processing
-now stops with an explicit error if it resolves to more than one supported
-filesystem. This avoids silently overwriting identical guest paths from different
-partitions or nested volumes. Select a single partition (for example, `--partition 3`);
-full multi-volume comparison is not implemented.
+**GPT multi-partition comparisons:** partitions are matched by unique GPT
+partition GUID, not table order, index, drive letter, or filename. An explicit
+selection follows the selected first-snapshot GUID into the second snapshot,
+even if its displayed `pN` changes. If that GUID disappears, it is a removal;
+a newly created GUID is an addition when using `all`. A matching GUID whose
+filesystem cannot be opened is an error, not a fabricated deletion.
 
-The pinned dfVFS version also assumes consecutive partition IDs when expanding
-interactive `all`. If it rejects `all` on an image with gaps in the IDs, choose a
-specific displayed ID instead.
+Files appear under `/Volumes/gpt-<GUID>/...` in the viewer and diff cache, with
+partition IDs/GUIDs shown on the volume nodes. Identical paths in different
+partitions remain separate. Filters still apply to the original guest path
+(e.g. `/Windows`), not the `/Volumes` prefix. Empty added/removed filesystems also
+have a visible partition result unless `--only-changed-files` is selected.
+
+**Scope and limits:** this is direct GPT filesystem support, using pinned dfVFS's
+preferred GPT backend. MBR/TSK-only multi-partition identity, nested APFS/LVM/VSS
+volumes, and nested partition tables are not paired automatically. Ambiguous or
+missing/duplicate GUIDs and incompatible filesystem-reader types stop with an
+explanation rather than guessed matches. An unchanged GUID is partition identity,
+not proof that a filesystem was not reformatted; TSK is a reader type shared by
+several filesystem formats. A single legacy/unpartitioned filesystem retains its
+existing unprefixed paths and selection behavior, without a GPT identity guarantee.
+Reserved/unallocated/unsupported partitions with no filesystem do not produce
+file comparisons. Native VM integration is still unverified; see validation below.
 
 After generation finishes, repeat the same input and filtering options with
 `--show`. For the disk-only example above:
@@ -282,11 +298,11 @@ python -m unittest discover -s tests -v
 python -m compileall -q vmdiff compose_runtime.py config.py server.py backend
 ```
 
-The committed Python suite contains 72 tests. Compose launches, native disk I/O,
+The committed Python suite contains 89 tests. Compose launches, native disk I/O,
 and Volatility output are replaced with controlled fixtures where required.
 The tests exercise real pinned dfVFS parser/scanner code, CLI validation and
 command construction, cache containment/collisions/completion, disk comparison
-logic, memory-only orchestration, optional process fields, the real POSIX memory
+logic, GPT identity pairing and scoped cache/tree roundtrips, memory-only orchestration, optional process fields, the real POSIX memory
 entrypoint, and Flask routes. The test-only `--no-deps` dfVFS install is not a
 runnable native disk-processing installation.
 
@@ -328,7 +344,7 @@ docker compose build vmdiff memdiff app
 ```
 
 Then generate the comparison again using the CLI before repeating it with
-`--show`. The new `v2-` cache namespace leaves old results untouched; old results
+`--show`. The new `v3-` cache namespace leaves old results untouched; old results
 are not migrated. `--no-cache` regenerates extraction and derived results.
 Interactive partition runs always regenerate because their selected ID is not
 known to the separate viewer invocation. Repeat the same input/options for
@@ -349,7 +365,7 @@ tested here.
 
 Remaining limitations: content-change detection first compares size/metadata and
 can miss same-size edits with unchanged metadata; content diffs over 2 MiB use a
-placeholder; only one supported filesystem is processed; native VMDK chain/handle
+placeholder; non-GPT/nested multi-volume pairing is unsupported; native VMDK chain/handle
 lifecycle and real VM processing still need integration validation. The audit is
 not a guarantee of forensic completeness or a full dependency-security audit.
 

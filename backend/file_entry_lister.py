@@ -1,5 +1,8 @@
 import re
 import logging
+import pathlib
+
+import volume_identity
 
 
 from dfvfs.helpers import volume_scanner
@@ -17,7 +20,7 @@ class FileEntryLister(volume_scanner.VolumeScanner):
         value: '\\x{0:02x}'.format(value)
         for value in _NON_PRINTABLE_CHARACTERS})
 
-    def __init__(self, source, volume_scanner_options, mediator=None, ignore_dirs=None, allow_dirs=None):
+    def __init__(self, source, volume_scanner_options, mediator=None, ignore_dirs=None, allow_dirs=None, selection_reference=None):
         """Initializes a file entry lister.
 
         Args:
@@ -35,26 +38,89 @@ class FileEntryLister(volume_scanner.VolumeScanner):
 
         self._list_only_files = False
 
+        self.selection_reference = selection_reference
+        self.partition_inventory = None
+        self.select_all = volume_scanner_options.partitions == ["all"]
+        self._namespace = False
+        self.base_by_identity = {}
+
         self.base_path_specs = self.GetBasePathSpecs(
             source, options=volume_scanner_options)
 
         self.source = source
 
-        if not self.base_path_specs:
-            raise Exception(
-                f'{source}: No supported file system found in source.')
+        if mediator is not None and selection_reference is None:
+            self.select_all = self.select_all or getattr(mediator, 'selected_all_partitions', False)
+        if selection_reference is not None:
+            self.select_all = selection_reference.select_all
 
-        if len(self.base_path_specs) != 1:
-            raise ValueError(
-                'Multiple supported volumes were selected. Choose exactly one '
-                'partition/volume; combining volumes can overwrite identical paths.')
+        for base in self.base_path_specs:
+            identity = volume_identity.describe_base(base)
+            if identity.startswith('gpt-') and self.partition_inventory is None:
+                table = factory.Factory.NewPathSpec('GPT', location='/', parent=base.parent.parent)
+                self.partition_inventory = volume_identity.gpt_inventory(table)
+            if identity in self.base_by_identity:
+                raise ValueError('Multiple or nested filesystems lack distinct supported GPT identities. '
+                                 'Select one filesystem/volume explicitly; APFS/LVM/VSS multi-volume pairing is unsupported.')
+            self.base_by_identity[identity] = base
 
-        # Paths are unambiguous only within this single filesystem.
-        self.base_path_spec = self.base_path_specs[0]
-        self.file_system = resolver.Resolver.OpenFileSystem(
-            self.base_path_spec)
+        # A one-partition scan can bypass dfVFS's partition selector. Apply the
+        # same identity filter here too, not an index-based accidental match.
+        if selection_reference is not None and selection_reference.is_gpt and not self.select_all:
+            self.base_by_identity = {
+                key: base for key, base in self.base_by_identity.items()
+                if key in selection_reference.base_by_identity}
+            self.base_path_specs = list(self.base_by_identity.values())
 
+        if selection_reference is not None and selection_reference.is_gpt:
+            if self.partition_inventory is None:
+                raise ValueError('Target is not a comparable GPT partition table; refusing index-based pairing.')
+            # A partition still present in the table but not readable is NOT a
+            # deleted partition. Do not emit misleading mass file deletions.
+            still_present = set(self.partition_inventory.values()) & set(selection_reference.base_by_identity)
+            if still_present - set(self.base_by_identity):
+                raise ValueError('A matching GPT partition exists but no supported/readable filesystem was found: ' +
+                                 ', '.join(sorted(still_present - set(self.base_by_identity))))
+
+        if not self.base_path_specs and not (
+                selection_reference is not None and selection_reference.is_gpt
+                and self.partition_inventory is not None):
+            raise ValueError(f'{source}: No supported file system found in source.')
+
+        self.base_path_spec = self.base_path_specs[0] if self.base_path_specs else None
+        self.file_system = (resolver.Resolver.OpenFileSystem(self.base_path_spec)
+                            if self.base_path_spec is not None else None)
         self.file_entries = {}
+
+    @property
+    def is_gpt(self):
+        return bool(self.base_by_identity) and all(key.startswith('gpt-') for key in self.base_by_identity)
+
+    def _GetPartitionIdentifiers(self, scan_node, options):
+        if scan_node.type_indicator == 'GPT':
+            self.partition_inventory = volume_identity.gpt_inventory(scan_node.path_spec)
+            if self.selection_reference is not None and self.selection_reference.is_gpt:
+                if self.selection_reference.select_all:
+                    return list(self.partition_inventory)
+                identities = self.selection_reference.base_by_identity
+                return [identifier for identifier, identity in self.partition_inventory.items()
+                        if identity in identities]
+        return super()._GetPartitionIdentifiers(scan_node, options)
+
+    @staticmethod
+    def _guest_path(path):
+        # Keep guest path filtering separate from the comparison namespace.
+        if path.startswith('\\'):
+            path = pathlib.PureWindowsPath(path).as_posix()
+        if not path.startswith('/') or '..' in pathlib.PurePosixPath(path).parts:
+            raise ValueError('Invalid guest filesystem path: %r' % path)
+        return str(pathlib.PurePosixPath(path))
+
+    def _key(self, identity, guest_path):
+        guest_path = self._guest_path(guest_path)
+        if not self._namespace:
+            return guest_path
+        return '/Volumes/' + identity + (guest_path if guest_path != '/' else '')
 
     def _GetDisplayPath(self, path_spec, path_segments, data_stream_name):
         """Retrieves a path to display.
@@ -90,7 +156,7 @@ class FileEntryLister(volume_scanner.VolumeScanner):
 
     def _ShouldListDir(self, file_entry):
 
-        location = file_entry.path_spec.location
+        location = self._guest_path(file_entry.path_spec.location)
 
         for allow_dir in self.allow_dirs:
             if location.startswith(allow_dir) or allow_dir.startswith(location):
@@ -102,7 +168,7 @@ class FileEntryLister(volume_scanner.VolumeScanner):
         return False
 
     def _ListFileEntry(
-            self, file_entry):
+            self, file_entry, identity):
         """Lists a file entry.
 
         Args:
@@ -116,7 +182,7 @@ class FileEntryLister(volume_scanner.VolumeScanner):
 
             location = _dedup_backslashes(location)
 
-        self.file_entries[location] = file_entry
+        self.file_entries[self._key(identity, location)] = file_entry
 
         try:
             for sub_file_entry in file_entry.sub_file_entries:
@@ -124,7 +190,7 @@ class FileEntryLister(volume_scanner.VolumeScanner):
                 if not self._ShouldListDir(sub_file_entry):
                     continue
 
-                self._ListFileEntry(sub_file_entry)
+                self._ListFileEntry(sub_file_entry, identity)
 
         except OSError as e:
             if "unable to read MFT entry:" in str(e):
@@ -138,7 +204,8 @@ class FileEntryLister(volume_scanner.VolumeScanner):
 
     def ListFileEntries(self):
         """Lists file entries in the base path specification."""
-        for base_path_spec in self.base_path_specs:
+        self.file_entries = {}
+        for identity, base_path_spec in self.base_by_identity.items():
             self.file_system = resolver.Resolver.OpenFileSystem(base_path_spec)
             file_entry = resolver.Resolver.OpenFileEntry(base_path_spec)
 
@@ -146,21 +213,47 @@ class FileEntryLister(volume_scanner.VolumeScanner):
                 logging.warning(
                     'Unable to open base path specification:\n{0:s}'.format(
                         base_path_spec))
-                return
+                raise RuntimeError("Unable to open selected filesystem: " + identity)
 
-            self._ListFileEntry(file_entry)
+            self._ListFileEntry(file_entry, identity)
 
     def GetFileEntry(self, path):
+        if self._namespace:
+            parts = path.split('/', 3)
+            if len(parts) < 3 or parts[1] != 'Volumes':
+                return None  # synthetic grouping roots
+            identity = parts[2]
+            guest_path = '/' + parts[3] if len(parts) == 4 else '/'
+            base_path_spec = self.base_by_identity.get(identity)
+        else:
+            guest_path = path
+            base_path_spec = self.base_path_spec
+        if base_path_spec is None:
+            return None
+        guest_path = self._guest_path(guest_path)
+        # Use the native root's separator (NTFS roots may be backslash-based).
+        if (base_path_spec.location or '').startswith('\\'):
+            guest_path = guest_path.replace('/', '\\')
+        path_spec = factory.Factory.NewPathSpec(
+            base_path_spec.type_indicator, location=guest_path, parent=base_path_spec.parent)
+        try:
+            return resolver.Resolver.OpenFileEntry(path_spec)
+        except errors.BackEndError as exc:
+            raise RuntimeError('Unable to open selected filesystem path: ' + path) from exc
 
-        for base_path_spec in self.base_path_specs:
-            path_spec = factory.Factory.NewPathSpec(
-                base_path_spec.type_indicator, location=path, parent=base_path_spec.parent)
-            try:
-                file_entry = resolver.Resolver.OpenFileEntry(path_spec)
-                if file_entry:
-                    return file_entry
-            except errors.BackEndError:
-                logging.warning(
-                    f"{base_path_spec.location}: Unable to open file: {path}")
 
-        return None
+def AlignVolumes(before, after):
+    """Use identical, collision-free scope on both snapshots, never zip order."""
+    identities = set(before.base_by_identity) | set(after.base_by_identity)
+    if 'legacy' in identities and len(identities) != 1:
+        raise ValueError('Cannot pair GPT and legacy/nested filesystem scopes. '
+                         'Select comparable single filesystems explicitly.')
+    if len(identities) > 1 and not all(key.startswith('gpt-') for key in identities):
+        raise ValueError('Multi-filesystem comparison requires unique GPT partition GUIDs.')
+    for identity in set(before.base_by_identity) & set(after.base_by_identity):
+        if before.base_by_identity[identity].type_indicator != after.base_by_identity[identity].type_indicator:
+            raise ValueError('Filesystem type changed for %s; compare separately rather than pairing incompatible roots.' % identity)
+    # GPT is always scoped, including a sole partition. This keeps identifiers
+    # stable when a later snapshot adds/removes another partition.
+    namespaced = any(key.startswith('gpt-') for key in identities)
+    before._namespace = after._namespace = namespaced

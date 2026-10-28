@@ -11,6 +11,7 @@ import os
 import inspect
 
 import unified_diff
+from dfvfs.lib import gpt_helper
 from dfvfs.lib import errors as dfvfs_errors
 
 
@@ -86,6 +87,15 @@ class DiskDiffer(object):
         self.changed_file_paths = None
 
         self.diffs = {}
+        self.path_labels = {}
+        for lister in (a_file_lister, b_file_lister):
+            for identity, base in getattr(lister, 'base_by_identity', {}).items():
+                if identity.startswith('gpt-'):
+                    key = '/Volumes/' + identity
+                    label = 'p%s (%s)' % (gpt_helper.GPTPathSpecGetEntryIndex(base.parent) + 1, identity)
+                    existing = self.path_labels.get(key)
+                    self.path_labels[key] = existing + ' → ' + label if existing and existing != label else label
+
 
     def get_a_file(self, path):
 
@@ -145,6 +155,24 @@ class DiskDiffer(object):
 
             results[virtual_path] = result
 
+        # Empty added/removed GPT filesystems still deserve a visible result,
+        # even when file metadata/content options would yield no root diff.
+        before = getattr(self.a_file_lister, 'base_by_identity', {})
+        after = getattr(self.b_file_lister, 'base_by_identity', {})
+        for identity in (set(before) ^ set(after)) if not self.only_changed_files else ():
+            if not identity.startswith('gpt-'):
+                continue
+            path = '/Volumes/' + identity
+            if path not in results:
+                added = identity in after
+                lines = ['diff --git a%s b%s\n' % (path, path),
+                         ('new' if added else 'deleted') + ' file mode 040755\n',
+                         '--- ' + ('/dev/null' if added else 'a' + path) + '\n',
+                         '+++ ' + ('b' + path if added else '/dev/null') + '\n',
+                         '@@ -0,0 +1 @@\n' if added else '@@ -1 +0,0 @@\n',
+                         ('+' if added else '-') + 'GPT partition ' + identity[4:] + '\n']
+                result = unified_diff.UnifiedDiff(lines, is_dir=True)
+                self.diffs[path] = results[path] = result
         return results
 
     def diff(self, path):

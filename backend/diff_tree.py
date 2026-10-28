@@ -90,6 +90,7 @@ class DiffTree(object):
                 # Save which node is this node's parent, if any.
                 self.node_parent_ids[pid] = ppid
 
+        text = getattr(self.differ, "path_labels", {}).get(path, text)
         node = {
             "title": text,
             "key": key,
