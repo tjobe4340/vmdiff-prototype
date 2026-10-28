@@ -149,6 +149,66 @@ class CLITests(unittest.TestCase):
         self.assertEqual(result.exit_code, 2)
         find.assert_not_called()
 
+    @patch.object(cli, "find_compose", return_value=["docker", "compose"])
+    @patch.object(cli, "run_compose")
+    def test_external_and_nested_image_paths_are_rejected(self, run, find):
+        nested = self.root / 'nested'
+        nested.mkdir()
+        (nested / 'before.vmdk').touch()
+        with tempfile.TemporaryDirectory() as outside:
+            external = Path(outside) / 'before.vmdk'
+            external.touch()
+            for path in (nested / 'before.vmdk', external):
+                args = self.disk_args()
+                args[2] = str(path)
+                result = self.runner.invoke(app, args)
+                self.assertEqual(result.exit_code, 2, result.output)
+                self.assertIn('directly inside', result.output)
+                self.assertIn('INPUT_DIR', result.output)
+        run.assert_not_called()
+
+    @patch.object(cli, "find_compose", return_value=["docker", "compose"])
+    @patch.object(cli, "run_compose")
+    def test_input_changes_update_cache_identity_and_flags_pass_through(self, run, find):
+        result = self.runner.invoke(app, self.disk_args() + ['--include-binary', '--debug'])
+        self.assertEqual(result.exit_code, 0, result.output)
+        first = run.call_args.args[1]
+        self.assertEqual(first['DIFF_IGNORE_BINARY'], 'False')
+        self.assertEqual(first['VMDIFF_DEBUG'], 'True')
+        (self.root / 'before.vmdk').write_text('changed image')
+        self.assertEqual(self.runner.invoke(app, self.disk_args()).exit_code, 0)
+        second = run.call_args.args[1]
+        self.assertNotEqual(first['VMDIFF_SOURCE_ID'], second['VMDIFF_SOURCE_ID'])
+        self.assertEqual(second['DIFF_IGNORE_BINARY'], 'True')
+
+    @patch.object(cli, "find_compose")
+    def test_invalid_regex_rejected_before_docker(self, find):
+        result = self.runner.invoke(app, self.disk_args() + ['--ignore-path', '['])
+        self.assertEqual(result.exit_code, 2)
+        self.assertIn('Invalid filter regular expression', result.output)
+        find.assert_not_called()
+
+    def test_snapshot_parser_accepts_blank_empty_and_reordered_fields(self):
+        path = self.root / 'test.vmsd'
+        path.write_text('\n# comment\nsnapshot0.displayName = ""\n'
+                        'snapshot0.createTimeLow = "1"\n'
+                        'snapshot0.createTimeHigh = "0"\n'
+                        'snapshot0.disk0.fileName = "before.vmdk"\n'
+                        'snapshot0.filename = "before.vmsn"\n'
+                        'snapshot0.uid = "7"\n')
+        result = cli.parse_vmsd(path)
+        self.assertEqual(result['7']['displayName'], '')
+        self.assertEqual(result['7']['disk_filename'], 'before.vmdk')
+        self.assertEqual(result['7']['memory_filename'], 'before.vmem')
+
+    def test_snapshot_parser_reports_malformed_and_missing_uid(self):
+        path = self.root / 'test.vmsd'
+        for content, message in [('not a record\n', 'Malformed'),
+                                 ('snapshot0.displayName = "name"\n', 'Missing or duplicate')]:
+            path.write_text(content)
+            with self.assertRaisesRegex(typer.BadParameter, message):
+                cli.parse_vmsd(path)
+
 
 if __name__ == "__main__":
     unittest.main()

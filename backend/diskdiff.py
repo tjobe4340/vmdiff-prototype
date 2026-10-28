@@ -1,4 +1,5 @@
 
+import codecs
 import difflib
 import hashlib
 
@@ -10,6 +11,7 @@ import os
 import inspect
 
 import unified_diff
+from dfvfs.lib import errors as dfvfs_errors
 
 
 # Hacks to import the config from the parent directory.
@@ -81,7 +83,7 @@ class DiskDiffer(object):
         self.show_times = show_times
         self.only_changed_files = only_changed_files
 
-        self.changed_file_paths = set()
+        self.changed_file_paths = None
 
         self.diffs = {}
 
@@ -191,7 +193,8 @@ class DiskDiffer(object):
         # We're not ignoring binary if we're here, so treat the files as if they might be binary.
         if self.use_contents and has_contents:
             # Don't try and diff files larger than MAX_SIZE
-            if (a_file and a_file.size > self.MAX_SIZE) or (b_file and b_file.size > self.MAX_SIZE):
+            if any(file is not None and file.size is not None and file.size > self.MAX_SIZE
+                   for file in (a_file, b_file)):
                 logging.info(f"Generating generic diff: (too big): {path}")
                 size = b_file.size if b_file else a_file.size
                 contents_diff = [
@@ -202,36 +205,22 @@ class DiskDiffer(object):
                     f" File too large to diff ({size}B)\n"
                 ]
 
-            # If the file is binary, diff it as binary.
-            elif not self.ignore_binary:
-                files = [a_file, b_file]
-                existing_files = [f for f in files if f is not None]
-                binary_files = [
-                    self._is_binary(f) for f in existing_files
-                ]
-
-                # If the files are both binary (or one is None and the other is binary), diff them as binary
-                if all(binary_files):
-                    if self._compare_binaries(a_file, b_file):
-                        contents_diff = [
-                            f"--- {path}\n",
-                            f"+++ {path}\n",
-                            "@@ 0,0 +0,0 @@\n",
-                            " Binary files differ\n"
-                        ]
             else:
-                # If at least one file is not binary, do a real diff.
-                # If only one is binary, just consider it the string "Binary File"
-                a_contents_sequence = self.get_contents_sequence(
-                    a_file)
-                b_contents_sequence = self.get_contents_sequence(
-                    b_file)
-
-                # If both are nonbinary (😎😎😎) diff them as text
-                contents_diff = list(difflib.unified_diff(
-                    a_contents_sequence,
-                    b_contents_sequence,
-                    **self._make_diff_kwargs(path)))
+                existing_files = [file for file in (a_file, b_file)
+                                  if file is not None and file.IsFile()]
+                if existing_files and any(self._is_binary(file) for file in existing_files):
+                    if not self._compare_binaries(a_file, b_file):
+                        contents_diff = [
+                            f"--- {path}\n", f"+++ {path}\n",
+                            "@@ 0,0 +0,0 @@\n", " Binary files differ\n"
+                        ]
+                else:
+                    # Including binaries must not disable ordinary text diffs.
+                    # Mixed text/binary pairs above use hash comparison too;
+                    # text must never equal a synthetic binary placeholder.
+                    contents_diff = list(difflib.unified_diff(
+                        self.get_contents_sequence(a_file),
+                        self.get_contents_sequence(b_file), **diff_kwargs))
 
         if not any((stat_diff, times_diff, attribute_diff, contents_diff)):
             logging.debug(f"Ignoring (no diff): {path}")
@@ -392,75 +381,66 @@ class DiskDiffer(object):
 
         return True
 
-    def _is_binary(self, file):
+    def _open_contents(self, file):
+        try:
+            stream = file.GetFileObject()
+            if stream is not None:
+                stream.seek(0)
+        except (OSError, dfvfs_errors.BackEndError) as exc:
+            raise RuntimeError('Unable to open file contents: ' +
+                               file.path_spec.location) from exc
+        return stream
 
-        if file is None:
+    def _is_binary(self, file):
+        if file is None or not file.IsFile():
             return False
         textchars = bytearray({7, 8, 9, 10, 12, 13, 27}
-                              | set(range(0x20, 0x100)) - {0x7f})  # noqa
-
-        file_obj = file.GetFileObject()
-        if file_obj is None:
-            return False
+                              | set(range(0x20, 0x100)) - {0x7f})
+        stream = self._open_contents(file)
+        if stream is None:
+            return False  # No default/unnamed data stream (valid on NTFS).
         try:
-            header = file_obj.read(512)
-            file_obj.seek(0)
-
+            sample = stream.read(513)
+            header = sample[:512]
             try:
-                header.decode("utf8", errors="strict")
+                # Do not mistake a UTF-8 code point cut by the sampling boundary
+                # for a binary file. At EOF, incomplete UTF-8 is still invalid.
+                decoder = codecs.getincrementaldecoder('utf8')()
+                decoder.decode(header, final=len(sample) <= 512)
             except UnicodeDecodeError:
                 return True
-
             return bool(header.translate(None, textchars))
-
-        except OSError:
-            logging.warning(f"Failed to read {file.path_spec.location}")
-            return True
+        except (OSError, dfvfs_errors.BackEndError) as exc:
+            raise RuntimeError('Unable to read file contents: ' +
+                               file.path_spec.location) from exc
+        finally:
+            # dfVFS owns and caches its FileIO objects. They expose seek/read,
+            # not public close(); leave the cached object ready for its next use.
+            stream.seek(0)
 
     def _compare_binaries(self, file1, file2):
-
+        """Return equality; an unreadable file must not look like a missing one."""
         return self._hash_file(file1) == self._hash_file(file2)
 
     def _hash_file(self, file_entry):
-        """Calculates a message digest hash of the data of the file entry.
-
-        Args:
-        file_entry (dfvfs.FileEntry): file entry.
-
-        Returns:
-        str: digest hash or None.
-        """
-        if file_entry is None:
+        if file_entry is None or not file_entry.IsFile():
             return None
-
-        if file_entry.IsDevice() or file_entry.IsPipe() or file_entry.IsSocket():
-            # Ignore devices, FIFOs/pipes and sockets.
-            return None
-
         hash_context = hashlib.sha256()
-
+        stream = self._open_contents(file_entry)
+        if stream is None:
+            return hash_context.hexdigest()
         try:
-            file_object = file_entry.GetFileObject()
-        except IOError as exception:
-            logging.warning((
-                'Unable to open path specification:\n{0:s}'
-                'with error: {1!s}').format(file_entry.path_spec.location, exception))
-            return None
-
-        if not file_object:
-            return None
-
-        try:
-            data = file_object.read(self._READ_BUFFER_SIZE)
+            data = stream.read(self._READ_BUFFER_SIZE)
             while data:
                 hash_context.update(data)
-                data = file_object.read(self._READ_BUFFER_SIZE)
-        except IOError as exception:
-            logging.warning((
-                'Unable to read from path specification:\n{0:s}'
-                'with error: {1!s}').format(file_entry.path_spec.location, exception))
-            return None
-
+                data = stream.read(self._READ_BUFFER_SIZE)
+        except (OSError, dfvfs_errors.BackEndError) as exc:
+            raise RuntimeError('Unable to read file contents: ' +
+                               file_entry.path_spec.location) from exc
+        finally:
+            # dfVFS owns and caches its FileIO objects. They expose seek/read,
+            # not public close(); leave the cached object ready for its next use.
+            stream.seek(0)
         return hash_context.hexdigest()
 
     def get_stat_sequence(self, file):
@@ -469,7 +449,7 @@ class DiskDiffer(object):
 
         stat = file.GetStatAttribute()
         out = []
-        for attr in self._STAT_ATTRIBUTES:
+        for attr in sorted(self._STAT_ATTRIBUTES):
             value = getattr(stat, attr)
             if value and attr == "mode":
                 value = statlib.filemode(value)
@@ -482,8 +462,11 @@ class DiskDiffer(object):
         if file is None:
             return []
         out = []
-        for attr in self._TIME_ATTRIBUTES:
-            line = f"{attr}: {getattr(file, attr).CopyToDateTimeStringISO8601()}\n"
+        for attr in sorted(self._TIME_ATTRIBUTES):
+            timestamp = getattr(file, attr, None)
+            value = (timestamp.CopyToDateTimeStringISO8601()
+                     if timestamp is not None else '<unavailable>')
+            line = f"{attr}: {value}\n"
             out.append(line)
         return out
 
@@ -515,32 +498,32 @@ class DiskDiffer(object):
         return out
 
     def get_contents_sequence(self, file):
-        if file is None:
+        if file is None or not file.IsFile():
             return []
-
         if not self.ignore_binary and self._is_binary(file):
             return ["<Binary file>\n"]
-
-        file_obj = file.GetFileObject()
-
-        if file_obj is None:
+        stream = self._open_contents(file)
+        if stream is None:
             return []
-
-        contents = file_obj.read().decode("utf8", "ignore")
-
-        lines = []
-        # Make sure all lines end with newlines, to conform with diff format.
-
-        for line in contents.split("\n"):
-            lines.append(line + "\n")
-
-        return lines
+        try:
+            data = stream.read(self.MAX_SIZE + 1)
+            if len(data) > self.MAX_SIZE:
+                raise RuntimeError('File contents exceed the diff limit: ' + file.path_spec.location)
+            contents = data.decode('utf8', 'replace')
+        except (OSError, dfvfs_errors.BackEndError) as exc:
+            raise RuntimeError('Unable to read file contents: ' +
+                               file.path_spec.location) from exc
+        finally:
+            # dfVFS owns and caches its FileIO objects. They expose seek/read,
+            # not public close(); leave the cached object ready for its next use.
+            stream.seek(0)
+        return [line + '\n' for line in contents.split('\n')]
 
     def _equal_stat(self, file1, file2):
 
         stat1 = file1.GetStatAttribute()
         stat2 = file2.GetStatAttribute()
-        for attr in self._STAT_ATTRIBUTES:
+        for attr in sorted(self._STAT_ATTRIBUTES):
             if getattr(stat1, attr) != getattr(stat2, attr):
                 return False
 
@@ -548,7 +531,7 @@ class DiskDiffer(object):
 
     def _equal_times(self, file1, file2):
 
-        for attr in self._TIME_ATTRIBUTES:
+        for attr in sorted(self._TIME_ATTRIBUTES):
             if getattr(file1, attr) != getattr(file2, attr):
                 return False
 
@@ -576,7 +559,7 @@ class DiskDiffer(object):
 
     def get_changed_files(self):
 
-        if self.changed_file_paths:
+        if self.changed_file_paths is not None:
             return self.changed_file_paths
 
         # Otherwise, we need to list the files in A and B first

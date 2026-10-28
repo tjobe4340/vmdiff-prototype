@@ -1,7 +1,6 @@
 import inspect
 import os
 import sys
-import time
 
 import logging
 
@@ -40,12 +39,13 @@ if not os.path.exists(config.RUN_TREE_PATH):
 
 cache = diffcache.DiffCache(
     config.RUN_DISK_PATH, config.RUN_TREE_PATH, config.RUN_MEMORY_PATH)
-while True:
-    try:
-        tree, children_map = cache.get_tree_data_from_cache()
-        break
-    except FileNotFoundError:
-        time.sleep(3)
+try:
+    if not cache.tree_cache_exists():
+        raise ValueError('Comparison has no completion marker')
+    tree, children_map = cache.get_tree_data_from_cache()
+except (OSError, ValueError) as exc:
+    raise RuntimeError(
+        'Results are missing or incomplete; regenerate the comparison first.') from exc
 
 
 logging.debug(f"Tree: {len(tree)}, children: {len(children_map)}")
@@ -55,9 +55,12 @@ logging.debug(f"Tree: {len(tree)}, children: {len(children_map)}")
 def get_children_handler():
     key = request.args.get("key")
 
+    if not key:
+        return jsonify(error='A non-empty key is required'), 400
+    if key not in children_map:
+        return jsonify(error='Unknown tree key'), 404
     node_children = children_map[key]
     response = jsonify(node_children)
-    response.headers.add('Access-Control-Allow-Origin', '*')
 
     return response
 
@@ -67,7 +70,12 @@ def get_diff():
 
     key = request.args.get("key")
 
-    diff = cache.get_diff(key)
+    if not key:
+        return jsonify(error='A non-empty key is required'), 400
+    try:
+        diff = cache.get_diff(key)
+    except ValueError:
+        return jsonify(error='Invalid diff key'), 400
     if diff is None:
         logging.warning(f"No diff found for {key}")
         result = None
@@ -75,7 +83,6 @@ def get_diff():
         result = diff.diff_lines
 
     response = jsonify(result)
-    response.headers.add('Access-Control-Allow-Origin', '*')
 
     # to start with, just return the directories, and let the user expand out the files.
     return response
@@ -84,7 +91,6 @@ def get_diff():
 @app.route("/changed_files")
 def get_changed_files():
     response = jsonify(tree)
-    response.headers.add('Access-Control-Allow-Origin', '*')
 
     # To start with, just return the directories, and let the user expand out the files.
     return response
@@ -103,4 +109,4 @@ def index():
 
 if __name__ == "__main__":
 
-    app.run("0.0.0.0", debug=True)
+    app.run("127.0.0.1", debug=False)

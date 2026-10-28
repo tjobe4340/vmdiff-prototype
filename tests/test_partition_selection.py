@@ -97,13 +97,14 @@ class PartitionSelectionTests(unittest.TestCase):
                 GetRootFileEntry=lambda: SimpleNamespace(sub_file_entries=[])))
 
         config_values = dict(
-            PARTITION=configured, USE_CACHE=True, USE_MEMORY=False,
+            PARTITION=configured, USE_CACHE=True, USE_MEMORY=False, USE_DISK=True,
             FROM_DISK_PATH='before.vmdk', TO_DISK_PATH='after.vmdk',
             ignore_dirs=[], allow_dirs=[], diff_config={},
             RUN_DISK_PATH='/results/disk', RUN_TREE_PATH='/results/tree')
         cache = Mock(run_path=Path('/results/disk'))
         cache.cache_exists.return_value = True
         with patch.multiple(backend.config, **config_values), \
+                patch.object(backend, 'dump_api_data'), \
                 patch.object(backend, 'CachingVolumeScannerMediator',
                              return_value=mediator), \
                 patch.object(backend.file_entry_lister, 'FileEntryLister',

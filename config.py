@@ -15,7 +15,6 @@ def as_bool(var):
     if val == "true":
         return True
 
-    logging.debug(str(os.environ))
     raise RuntimeError(
         f"Environment variable with value {var} is neither True nor False")
 
@@ -28,7 +27,7 @@ diff_config = {
     key[5:].lower(): as_bool(os.environ[key])
     for key in diff_config_keys
 }
-dev = "_DEV" if os.environ.get("VMDIFF_DEV") else ""
+dev = "_DEV" if as_bool(os.environ.get("VMDIFF_DEV")) else ""
 
 filter_path_json = os.environ.get("FILTER_PATH_JSON")
 ignore_path_json = os.environ.get("IGNORE_PATH_JSON")
@@ -73,24 +72,31 @@ if FROM_MEMORY_IMAGE_FILENAME and TO_MEMORY_IMAGE_FILENAME and as_bool(os.enviro
 RESULTS_DIR = os.environ[f"RESULTS_DIR{dev}"]
 REACT_BUILD_DIR = os.environ[f"REACT_BUILD_DIR{dev}"]
 
-LOG_LEVEL = logging.DEBUG if dev else logging.INFO
+LOG_LEVEL = logging.DEBUG if dev or as_bool(os.environ.get("VMDIFF_DEBUG")) else logging.INFO
+
+
+# v2 changes cache identity and the on-disk disk entry format. Old caches are
+# deliberately left untouched; they must not be interpreted as v2 results.
+SOURCE_ID = os.environ.get('VMDIFF_SOURCE_ID') or os.path.abspath(SNAPSHOT_DIR)
+MEMORY_RUN_ID = os.environ.get('VMDIFF_MEMORY_RUN_ID') or (
+    'memory-v2-' + hashlib.sha256(json.dumps({
+        'source': SOURCE_ID, 'from': FROM_MEMORY_IMAGE_FILENAME,
+        'to': TO_MEMORY_IMAGE_FILENAME}, sort_keys=True).encode()).hexdigest()[:24])
 
 
 def get_run_id():
-    opts_bitfield = "".join(
-        ["1" if opt else "0" for opt in sorted(diff_config.values())])
-
-    dir_opts = "".join(sorted(allow_dirs)) + "".join(sorted(ignore_dirs))
-
-    config_str = opts_bitfield + dir_opts
-    config_hash = hashlib.sha1(config_str.encode()).hexdigest()[:10]
-
-    if USE_DISK:
-        filename = f"{FROM_DISK_IMAGE_FILENAME}--{TO_DISK_IMAGE_FILENAME}--{config_hash}"
-    else:
-        filename = f"{FROM_MEMORY_IMAGE_FILENAME}--{TO_MEMORY_IMAGE_FILENAME}--{config_hash}"
-
-    return filename
+    options = {
+        'schema': 2, 'source': SOURCE_ID,
+        'disk': [USE_DISK, FROM_DISK_IMAGE_FILENAME, TO_DISK_IMAGE_FILENAME],
+        'memory': [USE_MEMORY, FROM_MEMORY_IMAGE_FILENAME, TO_MEMORY_IMAGE_FILENAME],
+        'partition': PARTITION, 'diff': diff_config,
+        'allow_dirs': sorted(allow_dirs), 'ignore_dirs': sorted(ignore_dirs),
+        'ignore_processes': IGNORE_PROCESSES_REGEX,
+        'memory_plugins': sorted(MEMORY_PLUGINS),
+    }
+    digest = hashlib.sha256(json.dumps(
+        options, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:24]
+    return 'v2-' + digest
 
 
 RUN_ID = get_run_id()

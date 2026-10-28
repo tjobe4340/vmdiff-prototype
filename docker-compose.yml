@@ -7,6 +7,8 @@ services:
       context: ./
       dockerfile: ./backend/Dockerfile
     tty: true
+    environment:
+      DIFF_IGNORE_BINARY: ${DIFF_IGNORE_BINARY:-True}
     env_file:
       - .env
     volumes:
@@ -24,6 +26,8 @@ services:
       - ./memory-processing/volatilitycache:/home/unprivileged/.cache/volatility3
       - ./results:$RESULTS_DIR
   app:
+    environment:
+      DIFF_IGNORE_BINARY: ${DIFF_IGNORE_BINARY:-True}
     image: vmdiff/vmdiff-app
     build:
       context: .
@@ -33,4 +37,4 @@ services:
     volumes:
       - ./results:$RESULTS_DIR
     ports:
-      - "5000:5000"
+      - "127.0.0.1:5000:5000"
