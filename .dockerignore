@@ -30,3 +30,6 @@
 **/node_modules
 LICENSE
 README.md
+
+# Never copy host-generated bundles into the frontend build stage.
+frontend/build

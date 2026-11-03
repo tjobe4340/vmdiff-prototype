@@ -1,9 +1,11 @@
-FROM node:lts-alpine as frontend
+FROM node:24-alpine AS frontend
 WORKDIR /app
 ENV PATH /app/node_modules/.bin:$PATH
+# Install the committed npm lockfile, including build-time dependencies.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
 COPY frontend ./
-RUN yarn install --production
-RUN yarn build --production
+RUN npm run build
 
 
 # For more information, please refer to https://aka.ms/vscode-docker-python

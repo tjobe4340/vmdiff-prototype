@@ -216,7 +216,7 @@ def main(
         return hashlib.sha256(payload.encode()).hexdigest()[:24]
 
     source_id = source_identity((from_disk, to_disk, from_memory, to_memory))
-    memory_run_id = 'memory-v2-' + source_identity((from_memory, to_memory))
+    memory_run_id = 'memory-v3-' + source_identity((from_memory, to_memory))
 
     # Convert to filenames, not file paths.
     env_var_mapping = {

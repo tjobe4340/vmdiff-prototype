@@ -21,8 +21,8 @@ class MemoryScriptTests(unittest.TestCase):
                         CALL_LOG=str(self.root / 'calls'), RESULTS_DIR=str(self.root),
                         SNAPSHOT_DIR=str(self.root), MEMORY_PLUGINS='windows.pslist.PsList',
                         FROM_MEMORY_IMAGE_FILENAME='before.vmem', TO_MEMORY_IMAGE_FILENAME='after.vmem',
-                        VMDIFF_MEMORY_RUN_ID='memory-v2-test', USE_CACHE='True')
-        self.outputs = self.root / 'memory/memory-v2-test'
+                        VMDIFF_MEMORY_RUN_ID='memory-v3-test', USE_CACHE='True')
+        self.outputs = self.root / 'memory/memory-v3-test'
 
     def run_script(self, **options):
         return subprocess.run(['sh', str(ROOT / 'memory-processing/memdiff.sh')],
@@ -38,6 +38,17 @@ class MemoryScriptTests(unittest.TestCase):
         self.assertEqual(list(self.outputs.glob('*.json')), [])
         self.assertEqual(list(self.outputs.glob('*.tmp.*')), [])
 
+    def test_failure_keeps_log_and_explains_incomplete_memory(self):
+        binary = self.root / 'volatility3'
+        binary.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >&2\necho kernel-requirement-failed >&2\nexit 23\n')
+        result = self.run_script(VMDIFF_DEBUG='True')
+        self.assertEqual(result.returncode, 23)
+        self.assertIn('Memory comparison has NOT completed', result.stderr)
+        log = self.outputs / 'from-windows.pslist.PsList.json.stderr.log'
+        self.assertIn('kernel-requirement-failed', log.read_text())
+        self.assertIn('-vvv', log.read_text())
+        self.assertFalse((self.outputs / 'from-windows.pslist.PsList.json').exists())
+
     def test_invalid_json_and_non_array_results_are_rejected(self):
         for value in ('not json', 'null', '{}'):
             result = self.run_script(PLUGIN_OUTPUT=value)
@@ -51,7 +62,7 @@ class MemoryScriptTests(unittest.TestCase):
         self.assertEqual(self.calls(), 2)
         self.assertEqual(self.run_script(USE_CACHE='False').returncode, 0)
         self.assertEqual(self.calls(), 4)
-        self.assertEqual(self.run_script(VMDIFF_MEMORY_RUN_ID='memory-v2-other').returncode, 0)
+        self.assertEqual(self.run_script(VMDIFF_MEMORY_RUN_ID='memory-v3-other').returncode, 0)
         self.assertEqual(self.calls(), 6)
 
     def test_invalid_existing_cache_is_reprocessed(self):

@@ -76,10 +76,10 @@ LOG_LEVEL = logging.DEBUG if dev or as_bool(os.environ.get("VMDIFF_DEBUG")) else
 
 
 # v3 adds GUID-scoped disk keys. Older derived caches are left untouched.
-# Raw memory extraction remains v2 because its contents are unchanged.
+# Raw memory v3 uses Volatility 2.28.2; do not reuse older extraction caches.
 SOURCE_ID = os.environ.get('VMDIFF_SOURCE_ID') or os.path.abspath(SNAPSHOT_DIR)
 MEMORY_RUN_ID = os.environ.get('VMDIFF_MEMORY_RUN_ID') or (
-    'memory-v2-' + hashlib.sha256(json.dumps({
+    'memory-v3-' + hashlib.sha256(json.dumps({
         'source': SOURCE_ID, 'from': FROM_MEMORY_IMAGE_FILENAME,
         'to': TO_MEMORY_IMAGE_FILENAME}, sort_keys=True).encode()).hexdigest()[:24])
 
@@ -94,6 +94,8 @@ def get_run_id():
         'ignore_processes': IGNORE_PROCESSES_REGEX,
         'memory_plugins': sorted(MEMORY_PLUGINS),
     }
+    if USE_MEMORY:
+        options['memory_extractor'] = 'volatility3-2.28.2'
     digest = hashlib.sha256(json.dumps(
         options, sort_keys=True, separators=(',', ':')).encode()).hexdigest()[:24]
     return 'v3-' + digest
