@@ -41,3 +41,16 @@ jobs:
         working-directory: frontend
         env:
           CI: 'true'
+  docker-frontend:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      # Exercise the actual Dockerfile rather than only the host npm commands.
+      - run: docker build --target frontend --tag vmdiff-frontend-test .
+      - run: docker run --rm vmdiff-frontend-test test -s /app/build/index.html
+  docker-memory:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --file memory-processing/Dockerfile --tag vmdiff-memory-test .
+      - run: docker run --rm --entrypoint vmdiff-volatility3 vmdiff-memory-test --help

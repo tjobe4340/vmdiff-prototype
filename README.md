@@ -389,3 +389,35 @@ of full Python 3.15 support or a new CI target.
 startup, native disk/memory-processing dependencies, actual VM snapshot diffs,
 or the built React UI in a browser. A complete end-to-end run with Docker and
 real snapshots is still needed to validate those paths.
+
+
+### Frontend and memory container updates
+
+The viewer frontend uses Node 24 and `npm ci` with the committed lockfile.
+Rebuild the containers after pulling these changes:
+
+```sh
+docker compose build memdiff app
+```
+
+Memory processing now uses Volatility 3 2.28.2 on the official multi-architecture
+Python 3.12 base instead of the old third-party image. Windows symbol requests
+send the PDB filename, GUID/age and public IP to Microsoft over HTTPS; memory
+dumps are processed locally, not uploaded. The memory cache namespace changed
+so results extracted with the old tool are not silently reused.
+
+If kernel identification still fails, list the snapshot filenames with
+`./vmdiff /path/to/VM --list-snapshots`, then run:
+
+```sh
+python3 memory-processing/diagnose.py /path/to/VM exact-before.vmem exact-after.vmem
+```
+
+The helper uses read-only snapshot mounts and records verbose `windows.info`
+results under `results/memory-diagnostics`. Keep matching `.vmsn` or `.vmss`
+metadata alongside each dump. Review logs for guest details before sharing.
+
+Unit tests use controlled fixtures, and CI checks container builds and the
+Volatility CLI startup. These do not establish compatibility with a particular
+Windows guest, ARM64 dump, VMware snapshot chain, or real-memory extraction.
+A successful run against the user's actual snapshots is still required.

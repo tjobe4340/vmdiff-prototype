@@ -13,7 +13,7 @@ if [ -z "$RUN_NAME" ]; then
 import hashlib, json, os
 source = os.environ.get('VMDIFF_SOURCE_ID') or os.path.abspath(os.environ.get('SNAPSHOT_DIR', '/snapshots'))
 options = {'source': source, 'from': os.environ['FROM_MEMORY_IMAGE_FILENAME'], 'to': os.environ['TO_MEMORY_IMAGE_FILENAME']}
-print('memory-v2-' + hashlib.sha256(json.dumps(options, sort_keys=True).encode()).hexdigest()[:24])
+print('memory-v3-' + hashlib.sha256(json.dumps(options, sort_keys=True).encode()).hexdigest()[:24])
 PY
 )
 fi
@@ -38,7 +38,20 @@ extract() {
     # Remove a prior success before reprocessing; failures must not look current.
     rm -f "$output"
     TEMP_OUTPUT=$(mktemp "$output.tmp.XXXXXX")
-    volatility3 --cache-path ./volatilitycache -o . -f "${SNAPSHOT_DIR:-/snapshots}/$image" --renderer json "$plugin" > "$TEMP_OUTPUT"
+    # Keep the actual plugin error for diagnosis, including failed runs.
+    # Debug output may include guest process names; logs stay in local results.
+    log_file="$output.stderr.log"
+    set --
+    case "${VMDIFF_DEBUG:-False}" in True|true) set -- -vvv;; esac
+    if volatility3 "$@" --cache-path ./volatilitycache -o . -f "${SNAPSHOT_DIR:-/snapshots}/$image" --renderer json "$plugin" > "$TEMP_OUTPUT" 2> "$log_file"; then
+        cat "$log_file" >&2
+    else
+        status=$?
+        cat "$log_file" >&2
+        printf 'Memory plugin %s failed for %s (exit %s). Diagnostic log: %s\n' "$plugin" "$image" "$status" "$log_file" >&2
+        printf '%s\n' 'Check matching VMware .vmsn/.vmss metadata, an unencrypted supported Intel Windows dump, and access to Microsoft symbols. Use --debug for verbose diagnostics. Memory comparison has NOT completed.' >&2
+        exit "$status"
+    fi
     valid_json "$TEMP_OUTPUT"
     cat "$TEMP_OUTPUT"
     mv "$TEMP_OUTPUT" "$output"
